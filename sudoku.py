@@ -3,6 +3,8 @@
 Standard library only. Run `python sudoku.py` for the menu or
 `python sudoku.py --self-check` to run the built-in tests.
 """
+import itertools
+import random
 import sys
 
 # A grid is a list of 81 ints, row-major, 0 = empty.
@@ -78,26 +80,77 @@ def is_solved(grid):
     return 0 not in grid and is_valid(grid)
 
 
-def solve(grid):
-    """Plain backtracking. Returns a solved copy, or None if unsolvable."""
+DIGITS = frozenset(range(1, 10))
+
+
+def _search(g, rng=None):
+    """Yield every solution of g. Each step fills naked singles (cells with
+    one candidate) until stuck, then branches on the cell with the fewest
+    candidates (MRV). rng shuffles branch order for random grids."""
+    g = list(g)
+    while True:
+        best, changed = None, False
+        for i in range(81):
+            if g[i]:
+                continue
+            cs = DIGITS - {g[p] for p in PEERS[i]}
+            if not cs:
+                return  # contradiction
+            if len(cs) == 1:
+                g[i] = next(iter(cs))
+                changed = True
+            elif best is None or len(cs) < len(best[1]):
+                best = (i, cs)
+        if not changed:
+            break
+    if best is None:
+        yield g
+        return
+    i, cs = best
+    order = sorted(cs)
+    if rng:
+        rng.shuffle(order)
+    for v in order:
+        g[i] = v
+        yield from _search(g, rng)
+
+
+def solve(grid, rng=None):
+    """Returns a solved copy, or None if invalid/unsolvable."""
     if not is_valid(grid):
         return None
-    g = list(grid)
+    return next(_search(grid, rng), None)
 
-    def bt():
-        try:
-            i = g.index(0)
-        except ValueError:
-            return True
-        for v in range(1, 10):
-            if can_place(g, i, v):
-                g[i] = v
-                if bt():
-                    return True
-        g[i] = 0
-        return False
 
-    return g if bt() else None
+def count_solutions(grid, limit=2):
+    """Number of solutions, stopping early at limit (2 = 'is it unique?')."""
+    if not is_valid(grid):
+        return 0
+    return sum(1 for _ in itertools.islice(_search(grid), limit))
+
+
+# Target clue counts. Removal stops early if uniqueness would break.
+DIFFICULTY = {"easy": 40, "medium": 32, "hard": 26}
+
+
+def generate(difficulty="medium", rng=None):
+    """Return (puzzle, solution) with a unique solution."""
+    rng = rng or random.Random()
+    solution = solve([0] * 81, rng)
+    puzzle = list(solution)
+    target = DIFFICULTY[difficulty]
+    cells = list(range(81))
+    rng.shuffle(cells)
+    clues = 81
+    for i in cells:
+        if clues <= target:
+            break
+        v, puzzle[i] = puzzle[i], 0
+        if count_solutions(puzzle) == 1:
+            clues -= 1
+        else:
+            puzzle[i] = v
+    return puzzle, solution
 
 
 # ---------------------------------------------------------------- CLI
@@ -129,11 +182,31 @@ def solve_and_show(grid):
         print("\nSolution:\n" + render(sol))
 
 
+def generate_and_show():
+    try:
+        d = input("Difficulty (easy/medium/hard) [medium]: ").strip().lower() or "medium"
+    except EOFError:
+        return
+    if d not in DIFFICULTY:
+        print("Unknown difficulty.")
+        return
+    puzzle, solution = generate(d)
+    clues = sum(1 for v in puzzle if v)
+    print(f"\n{d.title()} puzzle ({clues} clues):\n" + render(puzzle))
+    print("\nString: " + to_string(puzzle))
+    try:
+        if input("\nShow solution? (y/N) ").strip().lower() == "y":
+            print(render(solution))
+    except EOFError:
+        pass
+
+
 def menu():
     while True:
         print("\n=== Sudoku Studio ===")
         print("1) Solve the built-in sample puzzle")
         print("2) Solve a puzzle you paste in")
+        print("3) Generate a new puzzle")
         print("q) Quit")
         try:
             choice = input("> ").strip().lower()
@@ -146,6 +219,8 @@ def menu():
                 solve_and_show(read_puzzle())
             except ValueError as e:
                 print(f"Could not read puzzle: {e}")
+        elif choice == "3":
+            generate_and_show()
         elif choice in ("q", "quit", "exit"):
             return
         else:
@@ -170,6 +245,19 @@ def self_check():
             raise AssertionError("parse should fail")
         except ValueError:
             pass
+    assert count_solutions(g) == 1
+    assert count_solutions([0] * 81) == 2, "empty grid has many solutions"
+    assert count_solutions(bad) == 0
+    # A known 17-clue puzzle: propagation + MRV must handle minimal puzzles.
+    hard = parse("000000010400000000020000000000050407008000300001090000300400200050100000000806000")
+    hs = solve(hard)
+    assert hs and is_solved(hs) and all(h in (0, s) for h, s in zip(hard, hs))
+    rng = random.Random(7)
+    for d in DIFFICULTY:
+        p, s = generate(d, rng)
+        assert is_solved(s) and all(v in (0, sv) for v, sv in zip(p, s))
+        assert count_solutions(p) == 1, f"{d} puzzle not unique"
+        assert sum(1 for v in p if v) >= DIFFICULTY[d]
     print("self-check passed")
 
 
