@@ -153,6 +153,188 @@ def generate(difficulty="medium", rng=None):
     return puzzle, solution
 
 
+# ---------------------------------------------------------------- hints
+
+UNITS = (
+    [("row", r + 1, [r * 9 + c for c in range(9)]) for r in range(9)]
+    + [("column", c + 1, [r * 9 + c for r in range(9)]) for c in range(9)]
+    + [("box", b + 1, [(b // 3 * 3 + dr) * 9 + b % 3 * 3 + dc
+                       for dr in range(3) for dc in range(3)]) for b in range(9)]
+)
+
+
+def candidates(grid, i):
+    return DIGITS - {grid[p] for p in PEERS[i]}
+
+
+def cell_name(i):
+    return f"r{i // 9 + 1}c{i % 9 + 1}"
+
+
+def find_hint(grid):
+    """Next logical move as (index, digit, explanation), or None if no
+    naked/hidden single exists. Assumes the filled cells are correct."""
+    for i in range(81):
+        if not grid[i]:
+            cs = candidates(grid, i)
+            if len(cs) == 1:
+                v = next(iter(cs))
+                return i, v, f"Naked single: {cell_name(i)} can only be {v} - every other digit is already in its row, column or box."
+    for kind, n, cells in UNITS:
+        present = {grid[i] for i in cells}
+        for v in DIGITS - present:
+            spots = [i for i in cells if not grid[i] and v in candidates(grid, i)]
+            if len(spots) == 1:
+                i = spots[0]
+                return i, v, f"Hidden single: in {kind} {n}, {v} fits only at {cell_name(i)}."
+    return None
+
+
+def mistakes(grid, solution):
+    return [i for i in range(81) if grid[i] and grid[i] != solution[i]]
+
+
+def conflicts(grid):
+    """Filled cells that clash with a peer holding the same digit."""
+    return sorted(i for i in range(81) if grid[i] and not can_place(grid, i, grid[i]))
+
+
+# ---------------------------------------------------------------- play
+
+PLAY_HELP = """Commands (rows/cols 1-9):
+  r c v      place digit v at row r, column c   (e.g. 3 5 7)
+  r c 0      erase that cell
+  n r c v    toggle pencil mark v on a cell
+  notes      list pencil marks
+  hint       reveal one logical move, with the reasoning
+  check      mark wrong entries against the solution
+  help       show this help     q  quit"""
+
+
+def new_game(puzzle, solution=None):
+    return {
+        "givens": list(puzzle),
+        "grid": list(puzzle),
+        "solution": solution or solve(puzzle),
+        "notes": {},  # index -> set of pencil marks
+    }
+
+
+def render_play(game):
+    """Board with row/column numbers; '!' marks entries clashing with a peer."""
+    grid, givens = game["grid"], game["givens"]
+    bad = {i for i in conflicts(grid) if not givens[i]}
+    lines = ["    1 2 3   4 5 6   7 8 9"]
+    for r in range(9):
+        if r and r % 3 == 0:
+            lines.append("   -------+-------+------")
+        row = [f"{r + 1} "]
+        for c in range(9):
+            if c and c % 3 == 0:
+                row.append("|")
+            i = r * 9 + c
+            v = grid[i]
+            row.append("!" if i in bad else str(v) if v else "," if game["notes"].get(i) else ".")
+        lines.append(" ".join(row))
+    lines.append("('.' empty, ',' has pencil marks, '!' conflicting entry)")
+    return "\n".join(lines)
+
+
+def apply_command(game, line):
+    """Apply one play command. Returns a message for the player."""
+    parts = line.split()
+    if not parts:
+        return ""
+    cmd = parts[0].lower()
+    grid, givens, notes = game["grid"], game["givens"], game["notes"]
+    if cmd == "help":
+        return PLAY_HELP
+    if cmd == "hint":
+        wrong = mistakes(grid, game["solution"])
+        if wrong:
+            return "Fix your mistakes first: " + ", ".join(cell_name(i) for i in wrong)
+        h = find_hint(grid)
+        if h is None:
+            if 0 not in grid:
+                return "The puzzle is already complete."
+            i = grid.index(0)
+            h = (i, game["solution"][i], f"No single available - revealed {cell_name(i)} from the solution.")
+        i, v, why = h
+        grid[i] = v
+        notes.pop(i, None)
+        return why
+    if cmd == "check":
+        wrong = mistakes(grid, game["solution"])
+        if not wrong:
+            return "No mistakes so far."
+        return f"{len(wrong)} wrong: " + ", ".join(cell_name(i) for i in wrong)
+    if cmd == "notes":
+        if not notes:
+            return "No pencil marks."
+        return "\n".join(f"{cell_name(i)}: {' '.join(map(str, sorted(s)))}"
+                         for i, s in sorted(notes.items()))
+    nums = parts[1:] if cmd == "n" else parts
+    if len(nums) != 3 or not all(p.isdigit() and len(p) == 1 for p in nums):
+        return "Unknown command - type 'help'."
+    r, c, v = map(int, nums)
+    if not (1 <= r <= 9 and 1 <= c <= 9) or (cmd == "n" and v == 0):
+        return "Rows/cols are 1-9, digits 1-9."
+    i = (r - 1) * 9 + c - 1
+    if givens[i]:
+        return f"{cell_name(i)} is a given clue."
+    if cmd == "n":
+        if grid[i]:
+            return f"{cell_name(i)} is filled; erase it first."
+        marks = notes.setdefault(i, set())
+        marks ^= {v}
+        if not marks:
+            del notes[i]
+        return f"{cell_name(i)} marks: {' '.join(map(str, sorted(marks))) or '(none)'}"
+    grid[i] = v
+    if v == 0:
+        return f"Erased {cell_name(i)}."
+    notes.pop(i, None)
+    for p in PEERS[i]:  # placing a digit clears it from peers' pencil marks
+        if v in notes.get(p, ()):
+            notes[p].discard(v)
+            if not notes[p]:
+                del notes[p]
+    if not can_place(grid, i, v):
+        return f"Placed {v} at {cell_name(i)} - conflicts with a peer!"
+    return f"Placed {v} at {cell_name(i)}."
+
+
+def play(game):
+    print(PLAY_HELP)
+    while True:
+        print("\n" + render_play(game))
+        if is_solved(game["grid"]):
+            print("\nSolved! Well done.")
+            return
+        try:
+            line = input("play> ").strip()
+        except EOFError:
+            return
+        if line.lower() in ("q", "quit", "exit"):
+            return
+        msg = apply_command(game, line)
+        if msg:
+            print(msg)
+
+
+def play_menu():
+    try:
+        d = input("Play which? (easy/medium/hard/sample) [medium]: ").strip().lower() or "medium"
+    except EOFError:
+        return
+    if d == "sample":
+        play(new_game(parse(SAMPLE), parse(SAMPLE_SOLUTION)))
+    elif d in DIFFICULTY:
+        play(new_game(*generate(d)))
+    else:
+        print("Unknown choice.")
+
+
 # ---------------------------------------------------------------- CLI
 
 def read_puzzle():
@@ -207,6 +389,7 @@ def menu():
         print("1) Solve the built-in sample puzzle")
         print("2) Solve a puzzle you paste in")
         print("3) Generate a new puzzle")
+        print("4) Play a puzzle")
         print("q) Quit")
         try:
             choice = input("> ").strip().lower()
@@ -221,6 +404,8 @@ def menu():
                 print(f"Could not read puzzle: {e}")
         elif choice == "3":
             generate_and_show()
+        elif choice == "4":
+            play_menu()
         elif choice in ("q", "quit", "exit"):
             return
         else:
@@ -258,6 +443,36 @@ def self_check():
         assert is_solved(s) and all(v in (0, sv) for v, sv in zip(p, s))
         assert count_solutions(p) == 1, f"{d} puzzle not unique"
         assert sum(1 for v in p if v) >= DIFFICULTY[d]
+    # Play mode + hints.
+    game = new_game(g, sol)
+    assert "given" in apply_command(game, "1 1 9")
+    assert apply_command(game, "n 1 3 4").endswith("4")
+    apply_command(game, "n 1 3 2")
+    apply_command(game, "n 1 4 4")
+    assert apply_command(game, "1 3 4") == "Placed 4 at r1c3."
+    assert 2 not in game["notes"] and 3 not in game["notes"], "placing clears own and peer marks"
+    assert "conflicts" in apply_command(game, "1 4 5")  # 5 already in row 1
+    assert conflicts(game["grid"]) and "!" in render_play(game)
+    assert "r1c4" in apply_command(game, "check")
+    assert "Fix your mistakes" in apply_command(game, "hint")
+    assert apply_command(game, "1 4 0") == "Erased r1c4."
+    assert apply_command(game, "check") == "No mistakes so far."
+    assert "Unknown" in apply_command(game, "foo")
+    for _ in range(81):
+        if is_solved(game["grid"]):
+            break
+        msg = apply_command(game, "hint")
+        assert "single" in msg or "revealed" in msg, msg
+    assert game["grid"] == sol, "hints must solve the sample correctly"
+    h = find_hint(g)
+    assert h and sol[h[0]] == h[1]
+    # Hidden single: row 1 lacks 1, 2, 3 in c1-c3; 1s in columns 2 and 3 leave
+    # r1c1 as the only spot for 1, though every cell has 2+ candidates.
+    hs_grid = [0] * 81
+    hs_grid[3:9] = [4, 5, 6, 7, 8, 9]
+    hs_grid[4 * 9 + 1] = hs_grid[7 * 9 + 2] = 1
+    kind_hint = find_hint(hs_grid)
+    assert kind_hint[:2] == (0, 1) and kind_hint[2].startswith("Hidden single"), kind_hint
     print("self-check passed")
 
 
