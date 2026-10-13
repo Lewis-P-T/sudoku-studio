@@ -4,8 +4,11 @@ Standard library only. Run `python sudoku.py` for the menu or
 `python sudoku.py --self-check` to run the built-in tests.
 """
 import itertools
+import json
+import os
 import random
 import sys
+import time
 
 # A grid is a list of 81 ints, row-major, 0 = empty.
 SAMPLE = (
@@ -208,7 +211,9 @@ PLAY_HELP = """Commands (rows/cols 1-9):
   notes      list pencil marks
   hint       reveal one logical move, with the reasoning
   check      mark wrong entries against the solution
-  help       show this help     q  quit"""
+  undo       take back the last change
+  save       save the game (quitting also saves)
+  help       show this help     q  save & quit"""
 
 
 def new_game(puzzle, solution=None):
@@ -217,7 +222,46 @@ def new_game(puzzle, solution=None):
         "grid": list(puzzle),
         "solution": solution or solve(puzzle),
         "notes": {},  # index -> set of pencil marks
+        "moves": 0,
+        "elapsed": 0.0,  # seconds played, excluding time spent saved/away
+        "history": [],  # (grid, notes) snapshots for undo
     }
+
+
+SAVE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "sudoku_save.json")
+
+
+def save_game(game, path=SAVE_FILE):
+    # ponytail: one save slot and undo history isn't persisted; add slots if wanted
+    data = {
+        "givens": to_string(game["givens"]),
+        "grid": to_string(game["grid"]),
+        "solution": to_string(game["solution"]),
+        "notes": {str(i): sorted(s) for i, s in game["notes"].items()},
+        "moves": game["moves"],
+        "elapsed": game["elapsed"],
+    }
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(data, f)
+
+
+def load_game(path=SAVE_FILE):
+    """Saved game, or None if there is no (readable) save."""
+    try:
+        with open(path, encoding="utf-8") as f:
+            d = json.load(f)
+        game = new_game(parse(d["givens"]), parse(d["solution"]))
+        game["grid"] = parse(d["grid"])
+        game["notes"] = {int(i): set(v) for i, v in d["notes"].items()}
+        game["moves"], game["elapsed"] = int(d["moves"]), float(d["elapsed"])
+        return game
+    except (OSError, ValueError, KeyError, TypeError, AttributeError):
+        return None
+
+
+def format_time(seconds):
+    m, s = divmod(int(seconds), 60)
+    return f"{m}:{s:02d}"
 
 
 def render_play(game):
@@ -241,7 +285,24 @@ def render_play(game):
 
 
 def apply_command(game, line):
-    """Apply one play command. Returns a message for the player."""
+    """Apply one play command. Returns a message for the player.
+    Any change to the grid or notes is undoable; grid changes count as moves."""
+    if line.strip().lower() == "undo":
+        if not game["history"]:
+            return "Nothing to undo."
+        game["grid"][:], notes = game["history"].pop()
+        game["notes"].clear()
+        game["notes"].update(notes)
+        return "Undone."
+    before = (list(game["grid"]), {i: set(s) for i, s in game["notes"].items()})
+    msg = _apply(game, line)
+    if before != (game["grid"], game["notes"]):
+        game["history"].append(before)
+        game["moves"] += before[0] != game["grid"]
+    return msg
+
+
+def _apply(game, line):
     parts = line.split()
     if not parts:
         return ""
@@ -304,19 +365,38 @@ def apply_command(game, line):
     return f"Placed {v} at {cell_name(i)}."
 
 
-def play(game):
+def play(game, path=SAVE_FILE):
+    """Play until solved or quit. Quitting saves; solving clears the save."""
     print(PLAY_HELP)
+    start = time.monotonic()
+
+    def tick():
+        nonlocal start
+        now = time.monotonic()
+        game["elapsed"] += now - start
+        start = now
+
     while True:
+        tick()
         print("\n" + render_play(game))
+        print(f"Time {format_time(game['elapsed'])}   Moves {game['moves']}")
         if is_solved(game["grid"]):
-            print("\nSolved! Well done.")
+            print(f"\nSolved in {format_time(game['elapsed'])} with {game['moves']} moves! Well done.")
+            if os.path.exists(path):
+                os.remove(path)
             return
         try:
             line = input("play> ").strip()
         except EOFError:
-            return
-        if line.lower() in ("q", "quit", "exit"):
-            return
+            line = "q"
+        if line.lower() in ("q", "quit", "exit", "save"):
+            tick()
+            save_game(game, path)
+            if line.lower() != "save":
+                print("Game saved - choose 'Resume saved game' from the menu to continue.")
+                return
+            print("Game saved.")
+            continue
         msg = apply_command(game, line)
         if msg:
             print(msg)
@@ -390,6 +470,7 @@ def menu():
         print("2) Solve a puzzle you paste in")
         print("3) Generate a new puzzle")
         print("4) Play a puzzle")
+        print("5) Resume saved game")
         print("q) Quit")
         try:
             choice = input("> ").strip().lower()
@@ -406,6 +487,12 @@ def menu():
             generate_and_show()
         elif choice == "4":
             play_menu()
+        elif choice == "5":
+            game = load_game()
+            if game:
+                play(game)
+            else:
+                print("No saved game.")
         elif choice in ("q", "quit", "exit"):
             return
         else:
@@ -473,6 +560,28 @@ def self_check():
     hs_grid[4 * 9 + 1] = hs_grid[7 * 9 + 2] = 1
     kind_hint = find_hint(hs_grid)
     assert kind_hint[:2] == (0, 1) and kind_hint[2].startswith("Hidden single"), kind_hint
+    # Undo, move count, save/load round-trip.
+    import tempfile
+    game = new_game(g, sol)
+    assert apply_command(game, "undo") == "Nothing to undo."
+    apply_command(game, "1 3 4")
+    apply_command(game, "n 1 4 6")
+    apply_command(game, "1 1 9")  # rejected: given clue, not a move
+    assert game["moves"] == 1 and len(game["history"]) == 2
+    game["elapsed"] = 75.4
+    path = os.path.join(tempfile.mkdtemp(), "save.json")
+    save_game(game, path)
+    loaded = load_game(path)
+    for k in ("givens", "grid", "solution", "notes", "moves", "elapsed"):
+        assert loaded[k] == game[k], k
+    assert format_time(loaded["elapsed"]) == "1:15"
+    apply_command(game, "undo")
+    assert game["notes"] == {} and game["grid"][2] == 4
+    apply_command(game, "undo")
+    assert game["grid"] == g
+    with open(path, "w") as f:
+        f.write("{not json")
+    assert load_game(path) is None and load_game(path + ".missing") is None
     print("self-check passed")
 
 

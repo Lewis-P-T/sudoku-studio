@@ -8,6 +8,6 @@ Run `python sudoku.py` (menu) or `python sudoku.py --self-check`.
 - [x] 3. Generator: random full grid, remove clues while keeping a unique solution; easy / medium / hard by clue count.
 - [x] 4. Interactive play mode: place/erase digits (`r c v`), conflict detection, pencil marks, win detection.
 - [x] 5. Hints & checking: logical hint (naked/hidden single, with explanation), mark mistakes against the solution.
-- [ ] 6. Save / load games to a JSON file; resume; per-game timer and move count; undo.
+- [x] 6. Save / load games to a JSON file; resume; per-game timer and move count; undo.
 - [ ] 7. Stats & leaderboard: best times and games won per difficulty, persisted.
 - [ ] 8. Technique-based difficulty rater, import/export 81-char puzzle strings & files, README polish.
